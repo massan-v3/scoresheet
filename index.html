@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>麻雀スコア</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Yu Gothic', sans-serif;
+      background: #1a1a2e; color: #eee; min-height: 100vh; }
+    #root { max-width: 480px; margin: 0 auto; min-height: 100vh; }
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+// ── 定数 ────────────────────────────────────────────────────────
+const PLAYER_COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22'];
+const RANK_LABELS   = ['1位','2位','3位','4位','5位','6位'];
+
+// ウマ: label の「大きい方」が1位 (例: "10-30" → 1位+30, 2位+10, 3位-10, 4位-30)
+const UMA_PRESETS = {
+  3: [
+    { label: 'ウマなし', values: [0,0,0],      desc: '1位±0 / 2位±0 / 3位±0' },
+    { label: '10-10',   values: [10,0,-10],    desc: '1位+10 / 2位±0 / 3位-10' },
+    { label: '20-20',   values: [20,0,-20],    desc: '1位+20 / 2位±0 / 3位-20' },
+    { label: '30-30',   values: [30,0,-30],    desc: '1位+30 / 2位±0 / 3位-30' },
+  ],
+  4: [
+    { label: 'ウマなし', values: [0,0,0,0],        desc: '全員±0' },
+    { label: '5-10',    values: [10,5,-5,-10],    desc: '1位+10 / 2位+5 / 3位-5 / 4位-10' },
+    { label: '10-20',   values: [20,10,-10,-20],  desc: '1位+20 / 2位+10 / 3位-10 / 4位-20' },
+    { label: '10-30',   values: [30,10,-10,-30],  desc: '1位+30 / 2位+10 / 3位-10 / 4位-30' },
+    { label: '20-40',   values: [40,20,-20,-40],  desc: '1位+40 / 2位+20 / 3位-20 / 4位-40' },
+  ],
+};
+
+// ── 計算 ────────────────────────────────────────────────────────
+// activePoints: 参加プレイヤー順の持ち点配列 → 1000点単位の収支配列(同順)
+// 例: 持ち点25000/返し点30000/ウマ10-30/1位40000 → +60
+//   素点=(40000-30000)/1000=10, ウマ+30, オカ+20 → 60
+function calcMahjongScores(activePoints, rules) {
+  const { 持ち点, 返し点, umaValues } = rules;
+  const n = activePoints.length;
+  const indexed = activePoints.map((pt, i) => ({ pt, i }));
+  indexed.sort((a, b) => b.pt - a.pt);
+
+  // 同点→ウマ平均化
+  let r = 0;
+  while (r < n) {
+    let e = r + 1;
+    while (e < n && indexed[e].pt === indexed[r].pt) e++;
+    const avg = umaValues.slice(r, e).reduce((s, v) => s + v, 0) / (e - r);
+    for (let j = r; j < e; j++) indexed[j].uma = avg;
+    r = e;
+  }
+
+  // オカ = (返し点 - 持ち点) × 人数 ÷ 1000  ← 1位総取り
+  // 例: (30000-25000)*4/1000 = +20
+  const oka = (返し点 - 持ち点) * n / 1000;
+
+  const result = new Array(n).fill(0);
+  indexed.forEach((p, ri) => {
+    // すべて1000点単位で計算。レートは掛けない（表示はスコア、金額はセッション終了時に×レート）
+    result[p.i] = Math.round(((p.pt - 返し点) / 1000 + p.uma + (ri === 0 ? oka : 0)) * 10) / 10;
+  });
+
+  // 端数を1位に吸収
+  const sum = result.reduce((s, v) => s + v, 0);
+  if (Math.abs(sum) > 0.01) result[indexed[0].i] = Math.round((result[indexed[0].i] - sum) * 10) / 10;
+  return result;
+}
+
+// 1000点単位スコア → 整数なら整数表示、小数なら小数1桁
+function fmtScore(v) {
+  if (v === undefined || v === null) return '0';
+  const rounded = Math.round(v * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+// ── スタイル ─────────────────────────────────────────────────────
+const btnSmall = { width:32,height:32,borderRadius:6,border:'none',background:'#3d3d6e',
+  color:'#fff',fontSize:18,cursor:'pointer',flexShrink:0 };
+const tabBtn = { padding:'8px 14px',borderRadius:8,border:'none',cursor:'pointer',fontWeight:'bold',fontSize:14 };
+
+function Section({ title, children }) {
+  return (
+    <div style={{background:'#16213e',borderRadius:12,padding:16,marginBottom:14}}>
+      <div style={{fontSize:12,color:'#f39c12',fontWeight:'bold',marginBottom:10,letterSpacing:1}}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function NumberInput({ value, onChange, min, max, step=100, label, suffix='' }) {
+  const [display, setDisplay] = React.useState(String(value));
+  const focused = React.useRef(false);
+  React.useEffect(() => { if (!focused.current) setDisplay(String(value)); }, [value]);
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:4}}>
+      {label && <span style={{fontSize:12,color:'#aaa'}}>{label}</span>}
+      <div style={{display:'flex',alignItems:'center',gap:4}}>
+        <button onClick={() => onChange(Math.max(min??-Infinity, value-step))} style={btnSmall}>−</button>
+        <div style={{display:'flex',alignItems:'center',gap:3}}>
+          <input type="text" inputMode="numeric" value={display}
+            onFocus={e => { focused.current=true; if (display==='0') { setDisplay(''); } else e.target.select(); }}
+            onChange={e => {
+              const v = e.target.value;
+              setDisplay(v);
+              if (v !== '' && v !== '-') onChange(Number(v) || 0);
+            }}
+            onBlur={() => {
+              focused.current=false;
+              if (display===''||display==='-') { setDisplay('0'); onChange(0); }
+            }}
+            style={{width:72,textAlign:'center',background:'#2d2d4e',border:'1px solid #444',
+              color:'#fff',borderRadius:6,padding:'6px 4px',fontSize:14}}/>
+          {suffix && <span style={{fontSize:12,color:'#aaa'}}>{suffix}</span>}
+        </div>
+        <button onClick={() => onChange(Math.min(max??Infinity, value+step))} style={btnSmall}>＋</button>
+      </div>
+    </div>
+  );
+}
+
+function ScoreTag({ value, size=14, suffix='' }) {
+  const c = value>0?'#2ecc71':value<0?'#e74c3c':'#aaa';
+  return <span style={{color:c,fontWeight:'bold',fontSize:size}}>{value>0?'+':''}{fmtScore(value)}{suffix}</span>;
+}
+
+// ── セットアップ ─────────────────────────────────────────────────
+function SetupScreen({ onStart }) {
+  const [totalPlayers, setTotalPlayers] = useState(4);
+  const [playingCount, setPlayingCount] = useState(4);
+  const [names, setNames] = useState(['自分','プレイヤー2','プレイヤー3','プレイヤー4','プレイヤー5','プレイヤー6','プレイヤー7']);
+  const [持ち点, set持ち点] = useState(25000);
+  const [返し点, set返し点] = useState(30000);
+  const [umaIdx, setUmaIdx] = useState(3); // 10-30がデフォルト
+  const [レート, setレート] = useState(100);   // /1000点 (例: 100 = テンイチ)
+  const [chipRate, setChipRate] = useState(200); // /枚
+  const [initialChips, setInitialChips] = useState(20); // 初期チップ枚数
+  const [場代, set場代] = useState(0);          // 円/局
+
+  const pc = Math.min(playingCount, totalPlayers);
+  const presets = UMA_PRESETS[pc] || UMA_PRESETS[4];
+  const safeIdx = Math.min(umaIdx, presets.length-1);
+  const uma = presets[safeIdx];
+
+  return (
+    <div style={{padding:20}}>
+      <h1 style={{textAlign:'center',fontSize:22,marginBottom:24,color:'#f39c12',letterSpacing:2}}>🀄 麻雀スコア</h1>
+
+      <Section title="メンバー人数">
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:12,color:'#aaa',marginBottom:6}}>登録人数</div>
+          <div style={{display:'flex',gap:6}}>
+            {[3,4,5,6,7].map(n => (
+              <button key={n} onClick={() => { setTotalPlayers(n); if(playingCount>n) setPlayingCount(n); }}
+                style={{...tabBtn,background:totalPlayers===n?'#e74c3c':'#2d2d4e',
+                  color:totalPlayers===n?'#fff':'#aaa',fontSize:13}}>{n}人</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div style={{fontSize:12,color:'#aaa',marginBottom:6}}>1局あたりの対局人数</div>
+          <div style={{display:'flex',gap:6}}>
+            {[3,4].filter(n=>n<=totalPlayers).map(n => (
+              <button key={n} onClick={() => { setPlayingCount(n); setUmaIdx(0); }}
+                style={{...tabBtn,background:pc===n?'#3498db':'#2d2d4e',
+                  color:pc===n?'#fff':'#aaa',fontSize:13}}>{n}人打ち</button>
+            ))}
+          </div>
+        </div>
+        {totalPlayers > pc && (
+          <div style={{marginTop:8,fontSize:12,color:'#9b59b6',background:'#1a1a3e',borderRadius:6,padding:'6px 10px'}}>
+            ✦ {totalPlayers}人登録 / {pc}人打ち → 局ごとに参加者を選択します
+          </div>
+        )}
+      </Section>
+
+      <Section title="プレイヤー名">
+        {Array.from({length:totalPlayers}).map((_,i) => (
+          <div key={i} style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
+            <div style={{width:10,height:10,borderRadius:'50%',background:PLAYER_COLORS[i],flexShrink:0}}/>
+            <input value={names[i]} onChange={e=>{const n=[...names];n[i]=e.target.value;setNames(n);}}
+              style={{flex:1,background:'#2d2d4e',border:'1px solid #444',color:'#fff',
+                borderRadius:8,padding:'8px 12px',fontSize:15}}/>
+          </div>
+        ))}
+      </Section>
+
+      <Section title="ルール設定">
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:8}}>
+          <NumberInput label="持ち点" value={持ち点} onChange={set持ち点} min={0} step={1000}/>
+          <NumberInput label="返し点" value={返し点} onChange={set返し点} min={0} step={1000}/>
+          <NumberInput label="レート" value={レート} onChange={setレート} min={1} step={10} suffix="/1000点"/>
+        </div>
+        {/* オカの自動計算をリアルタイム表示 */}
+        <div style={{fontSize:12,color:'#aaa',background:'#0d1b2a',borderRadius:6,padding:'6px 10px',marginBottom:14}}>
+          オカ = (返し点{返し点.toLocaleString()} − 持ち点{持ち点.toLocaleString()}) × {pc}人 ÷ 1000
+          {' = '}
+          <span style={{color:'#f39c12',fontWeight:'bold'}}>
+            +{(返し点-持ち点)*pc/1000}
+          </span>
+          {' '}（1位総取り）
+        </div>
+        <div>
+          <div style={{fontSize:12,color:'#aaa',marginBottom:6}}>ウマ</div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginBottom:8}}>
+            {presets.map((u,i) => (
+              <button key={i} onClick={() => setUmaIdx(i)}
+                style={{...tabBtn,fontSize:13,background:safeIdx===i?'#3498db':'#2d2d4e',
+                  color:safeIdx===i?'#fff':'#aaa'}}>{u.label}</button>
+            ))}
+          </div>
+          {/* ウマ内訳を明示 */}
+          <div style={{fontSize:12,color:'#64b5f6',background:'#0d1b2a',borderRadius:6,padding:'6px 10px'}}>
+            {uma.desc}
+          </div>
+        </div>
+      </Section>
+
+      <Section title="チップ・場代（任意）">
+        <div style={{fontSize:12,color:'#666',marginBottom:10}}>
+          セッション終了時にまとめて精算します。不要なら0のままでOK。
+        </div>
+        <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+          <NumberInput label="チップ単価" value={chipRate} onChange={setChipRate} min={0} step={100} suffix="/枚"/>
+          <NumberInput label="初期チップ枚数" value={initialChips} onChange={setInitialChips} min={0} step={1} suffix="枚"/>
+          <NumberInput label="場代（合計/1局）" value={場代} onChange={set場代} min={0} step={100} suffix="円"/>
+        </div>
+        {(chipRate>0||場代>0) && (
+          <div style={{marginTop:8,fontSize:11,color:'#9b59b6',background:'#1a1a3e',borderRadius:6,padding:'6px 10px'}}>
+            {chipRate>0 && <div>✦ チップ: 終了時に最終枚数を入力 → 初期{initialChips}枚との差 × {chipRate}/枚で精算</div>}
+            {場代>0 && <div>✦ 場代: {場代}円を人数で均等割り（セッション終了時に控除）</div>}
+          </div>
+        )}
+      </Section>
+
+      <button onClick={() => onStart({
+          players: names.slice(0,totalPlayers), playingCount: pc,
+          rules: { 持ち点, 返し点, umaValues: uma.values, umaLabel: uma.label, umaDesc: uma.desc, レート, chipRate, initialChips, 場代 }
+        })}
+        style={{width:'100%',padding:14,borderRadius:12,border:'none',
+          background:'linear-gradient(135deg,#e74c3c,#c0392b)',color:'#fff',
+          fontSize:17,fontWeight:'bold',cursor:'pointer'}}>
+        ゲーム開始 →
+      </button>
+    </div>
+  );
+}
+
+// ── 点数入力画面 ─────────────────────────────────────────────────
+function ScoreInputScreen({ players, playingCount, rules, games, onAddGame, onShowHistory, onEndSession }) {
+  const needSelect = players.length > playingCount;
+  const lastActive = games.length > 0 ? games[games.length-1].activePlayers : null;
+  const defaultActive = (() => {
+    if (!needSelect) return players.map((_,i)=>i);
+    if (lastActive) {
+      const out = players.map((_,i)=>i).filter(i=>!lastActive.includes(i));
+      const stay = [...lastActive];
+      const picked = [...out];
+      while (picked.length < playingCount) picked.push(stay.shift());
+      return picked.sort((a,b)=>a-b);
+    }
+    return players.map((_,i)=>i).slice(0, playingCount);
+  })();
+
+  // メインのステップ: select → scores → tiebreak → tobi → (submit)
+  const [step, setStep]             = useState(needSelect?'select':'scores');
+  const [activePlayers, setAP]      = useState(defaultActive);
+  const [points, setPoints]         = useState(()=>Object.fromEntries(defaultActive.map(i=>[i,rules.持ち点])));
+  const [error, setError]           = useState('');
+
+  // 同点処理
+  const [tieGroups, setTieGroups]           = useState([]);   // [[pi,pi,...], ...]
+  const [tieGroupIdx, setTieGroupIdx]       = useState(0);
+  const [tieSelection, setTieSelection]     = useState([]);   // 今のグループの選択途中
+  const [allTieRes, setAllTieRes]           = useState({});   // {key: [orderedPi,...]}
+
+  // 飛び賞
+  const [tobiQueue, setTobiQueue] = useState([]);  // [bankruptPi, ...]
+  const [tobiIdx, setTobiIdx]     = useState(0);
+  const [tobiBy, setTobiBy]       = useState({});  // {bankruptPi: causerPi}
+
+  const resetGame = () => {
+    setAP(defaultActive);
+    setPoints(Object.fromEntries(defaultActive.map(i=>[i,rules.持ち点])));
+    setError('');
+    setTieGroups([]); setTieGroupIdx(0); setTieSelection([]); setAllTieRes({});
+    setTobiQueue([]); setTobiIdx(0); setTobiBy({});
+    setStep(needSelect?'select':'scores');
+  };
+
+  // ── 参加者選択ロジック ─────────────────────────────────────────
+  const togglePlayer = (i) => {
+    if (activePlayers.includes(i)) {
+      setAP(p=>p.filter(x=>x!==i));
+    } else {
+      if (activePlayers.length >= playingCount) return;
+      setAP(p=>[...p,i].sort((a,b)=>a-b));
+    }
+  };
+  const confirmSelect = () => {
+    if (activePlayers.length !== playingCount) { setError(`${playingCount}人を選んでください`); return; }
+    setPoints(Object.fromEntries(activePlayers.map(i=>[i,rules.持ち点])));
+    setError(''); setStep('scores');
+  };
+
+  // ── 点数確定ロジック ───────────────────────────────────────────
+  const totalPts   = activePlayers.reduce((s,i)=>s+(Number(points[i])||0), 0);
+  const expectedPts= rules.持ち点 * activePlayers.length;
+  const diff       = totalPts - expectedPts;
+
+  const confirmScores = () => {
+    if (Math.abs(diff) > 0) { setError(`合計が${diff>0?'+':''}${diff}点ずれています`); return; }
+    setError('');
+    // 同点グループを検出
+    const ptMap = {};
+    activePlayers.forEach(pi => { const pt=Number(points[pi])||0; if(!ptMap[pt])ptMap[pt]=[]; ptMap[pt].push(pi); });
+    const ties = Object.values(ptMap).filter(g=>g.length>1);
+    if (ties.length > 0) {
+      setTieGroups(ties); setTieGroupIdx(0); setTieSelection([]); setAllTieRes({});
+      setStep('tiebreak'); return;
+    }
+    goToTobi({});
+  };
+
+  // ── 同点処理ロジック ───────────────────────────────────────────
+  const curTieGroup = tieGroups[tieGroupIdx] || [];
+  const tieKey      = [...curTieGroup].sort((a,b)=>a-b).join(',');
+  // このグループより点数が高いプレイヤー数 = グループの先頭順位(0-indexed)
+  const tieBaseRank = activePlayers.filter(pi=>(Number(points[pi])||0)>(Number(points[curTieGroup[0]])||0)).length;
+
+  const selectTied = (pi) => {
+    if (tieSelection.includes(pi)) return;
+    const newSel = [...tieSelection, pi];
+    if (newSel.length === curTieGroup.length) {
+      // このグループ完了
+      const newRes = {...allTieRes, [tieKey]: newSel};
+      if (tieGroupIdx + 1 < tieGroups.length) {
+        setAllTieRes(newRes); setTieGroupIdx(tieGroupIdx+1); setTieSelection([]);
+      } else {
+        goToTobi(newRes);
+      }
+    } else {
+      setTieSelection(newSel);
+    }
+  };
+
+  // ── 飛び賞ロジック ─────────────────────────────────────────────
+  const goToTobi = (resolutions) => {
+    setAllTieRes(resolutions);
+    const bankrupt = activePlayers.filter(pi=>(Number(points[pi])||0)<0);
+    if (bankrupt.length > 0) {
+      setTobiQueue(bankrupt); setTobiIdx(0); setTobiBy({}); setStep('tobi');
+    } else {
+      finalSubmit(resolutions, {});
+    }
+  };
+
+  const curTobiPi = tobiQueue[tobiIdx];
+
+  const assignTobi = (causerPi) => {
+    // causerPi === null → 飛び賞なし（スキップ）
+    const newTobiBy = causerPi !== null
+      ? {...tobiBy, [curTobiPi]: causerPi}
+      : {...tobiBy};
+    if (tobiIdx + 1 < tobiQueue.length) {
+      setTobiBy(newTobiBy); setTobiIdx(tobiIdx+1);
+    } else {
+      finalSubmit(allTieRes, newTobiBy);
+    }
+  };
+
+  // ── 最終計算&提出 ──────────────────────────────────────────────
+  const finalSubmit = (resolutions, tobi) => {
+    // 順位順にプレイヤーを並べる
+    const sortedByPts = [...activePlayers].sort((a,b)=>(Number(points[b])||0)-(Number(points[a])||0));
+    const rankOrder = [];
+    let i = 0;
+    while (i < sortedByPts.length) {
+      let j = i+1;
+      while (j < sortedByPts.length && (Number(points[sortedByPts[j]])||0)===(Number(points[sortedByPts[i]])||0)) j++;
+      const grp = sortedByPts.slice(i,j);
+      if (grp.length > 1) {
+        const k = [...grp].sort((a,b)=>a-b).join(',');
+        rankOrder.push(...(resolutions[k] || grp));
+      } else { rankOrder.push(...grp); }
+      i = j;
+    }
+    // スコア計算
+    const n = activePlayers.length;
+    const { 持ち点, 返し点, umaValues } = rules;
+    const oka = (返し点 - 持ち点) * n / 1000;
+    const mj = {};
+    rankOrder.forEach((pi, rank) => {
+      const pt = Number(points[pi]) || 0;
+      mj[pi] = Math.round(((pt - 返し点) / 1000 + umaValues[rank] + (rank===0 ? oka : 0)) * 10) / 10;
+    });
+    // 端数吸収
+    const s = Object.values(mj).reduce((a,v)=>a+v,0);
+    if (Math.abs(s)>0.01) mj[rankOrder[0]] = Math.round((mj[rankOrder[0]]-s)*10)/10;
+    // 飛び賞 ±10
+    Object.entries(tobi).forEach(([bStr,causer])=>{
+      const b=parseInt(bStr);
+      mj[b]      = Math.round((mj[b]     -10)*10)/10;
+      mj[causer] = Math.round((mj[causer]+10)*10)/10;
+    });
+    onAddGame({ activePlayers:[...activePlayers], pointsByPlayer:{...points}, mahjongByPlayer:mj });
+    resetGame();
+  };
+
+  const runningTotals = players.map((_,pi)=>games.reduce((s,g)=>s+(g.mahjongByPlayer[pi]??0),0));
+  const gameNum = games.length + 1;
+  const headerBtns = (
+    <div style={{display:'flex',gap:8}}>
+      <button onClick={onShowHistory} style={{...tabBtn,background:'#2d2d4e',color:'#aaa',fontSize:12}}>
+        履歴({games.length})
+      </button>
+      <button onClick={onEndSession} style={{...tabBtn,background:'#9b59b6',color:'#fff',fontSize:12}}>終了</button>
+    </div>
+  );
+
+  // ── RENDER: 参加者選択 ─────────────────────────────────────────
+  if (step==='select') return (
+    <div style={{padding:20}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+        <h2 style={{fontSize:18,color:'#f39c12'}}>🀄 第{gameNum}局 — 参加者</h2>{headerBtns}
+      </div>
+      <Section title={`参加する${playingCount}人を選択`}>
+        <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+          {players.map((name,i)=>{
+            const active=activePlayers.includes(i);
+            return (
+              <button key={i} onClick={()=>togglePlayer(i)}
+                style={{padding:'10px 14px',borderRadius:10,border:`2px solid ${active?PLAYER_COLORS[i]:'#333'}`,
+                  background:active?PLAYER_COLORS[i]+'33':'#2d2d4e',color:active?PLAYER_COLORS[i]:'#777',
+                  fontWeight:'bold',cursor:'pointer',fontSize:14}}>
+                {name}{active&&<span style={{marginLeft:4,fontSize:11}}>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{marginTop:10,fontSize:13,color:activePlayers.length===playingCount?'#2ecc71':'#aaa'}}>
+          選択中: {activePlayers.length} / {playingCount}人
+        </div>
+        {error&&<div style={{marginTop:8,color:'#e74c3c',fontSize:13}}>{error}</div>}
+      </Section>
+      <button onClick={confirmSelect} disabled={activePlayers.length!==playingCount}
+        style={{width:'100%',padding:14,borderRadius:12,border:'none',
+          background:activePlayers.length===playingCount?'linear-gradient(135deg,#3498db,#2980b9)':'#333',
+          color:activePlayers.length===playingCount?'#fff':'#666',fontSize:17,fontWeight:'bold',cursor:'pointer'}}>
+        点数入力へ →
+      </button>
+    </div>
+  );
+
+  // ── RENDER: 点数入力 ───────────────────────────────────────────
+  if (step==='scores') {
+    const previewOk = Math.abs(diff)===0;
+    return (
+      <div style={{padding:20}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+          <h2 style={{fontSize:18,color:'#f39c12'}}>🀄 第{gameNum}局</h2>{headerBtns}
+        </div>
+        {needSelect && (
+          <div style={{marginBottom:12,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+            {activePlayers.map(i=>(
+              <span key={i} style={{fontSize:12,background:PLAYER_COLORS[i]+'33',color:PLAYER_COLORS[i],
+                border:`1px solid ${PLAYER_COLORS[i]}`,borderRadius:6,padding:'3px 8px'}}>{players[i]}</span>
+            ))}
+            <button onClick={()=>setStep('select')} style={{fontSize:12,background:'none',border:'1px solid #444',
+              color:'#aaa',borderRadius:6,padding:'3px 8px',cursor:'pointer'}}>変更</button>
+          </div>
+        )}
+        <div style={{background:'#16213e',borderRadius:12,padding:16,marginBottom:12}}>
+          {activePlayers.map(pi=>(
+            <div key={pi} style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
+              <div style={{width:8,height:36,borderRadius:4,background:PLAYER_COLORS[pi],flexShrink:0}}/>
+              <span style={{width:72,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                {players[pi]}
+              </span>
+              <div style={{flex:1,display:'flex',alignItems:'center',gap:4}}>
+                <button onClick={()=>setPoints(p=>({...p,[pi]:(Number(p[pi])||0)-100}))} style={btnSmall}>−</button>
+                <input type="text" inputMode="numeric" value={points[pi]??0}
+                  onFocus={e=>{ if(String(points[pi]??0)==='0'||String(points[pi]??0)===String(rules.持ち点)) e.target.select(); }}
+                  onChange={e=>{const v=e.target.value; setPoints(p=>({...p,[pi]:v===''||v==='-'?v:(parseInt(v)||0)}));}}
+                  onBlur={e=>{ setPoints(p=>({...p,[pi]:p[pi]===''||p[pi]==='-'?0:p[pi]})); }}
+                  style={{flex:1,textAlign:'center',background:'#2d2d4e',border:'1px solid #444',
+                    color:'#fff',borderRadius:6,padding:'6px 4px',fontSize:15}}/>
+                <button onClick={()=>setPoints(p=>({...p,[pi]:(Number(p[pi])||0)+100}))} style={btnSmall}>＋</button>
+              </div>
+            </div>
+          ))}
+          <div style={{borderTop:'1px solid #2d2d4e',paddingTop:10,display:'flex',justifyContent:'space-between',
+            fontSize:13,color:Math.abs(diff)>0?'#e74c3c':'#2ecc71'}}>
+            <span>合計: {totalPts.toLocaleString()}点</span>
+            <span>{Math.abs(diff)>0?`❌ ${diff>0?'+':''}${diff}点ずれ`:'✅ OK'}</span>
+          </div>
+        </div>
+        {error&&<div style={{background:'#c0392b',borderRadius:8,padding:'10px 14px',marginBottom:12,fontSize:13}}>{error}</div>}
+        <button onClick={confirmScores} disabled={!previewOk}
+          style={{width:'100%',padding:14,borderRadius:12,border:'none',
+            background:previewOk?'linear-gradient(135deg,#2ecc71,#27ae60)':'#333',
+            color:previewOk?'#fff':'#666',fontSize:17,fontWeight:'bold',cursor:previewOk?'pointer':'not-allowed'}}>
+          この局を確定
+        </button>
+        {games.length>0&&(
+          <div style={{background:'#16213e',borderRadius:12,padding:'12px 8px',marginTop:14,overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:14}}>
+              <thead>
+                <tr>
+                  <th style={{textAlign:'left',padding:'4px 8px',color:'#555',fontWeight:'normal',whiteSpace:'nowrap'}}>名前</th>
+                  {games.map((_,gi)=>(
+                    <th key={gi} style={{textAlign:'right',padding:'4px 8px',color:'#ccc',fontWeight:'normal',whiteSpace:'nowrap'}}>
+                      {gi+1}局
+                    </th>
+                  ))}
+                  <th style={{textAlign:'right',padding:'4px 8px',color:'#aaa',fontWeight:'bold',whiteSpace:'nowrap'}}>累計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {players.map((_,i)=>i)
+                  .sort((a,b)=>runningTotals[b]-runningTotals[a])
+                  .map((pi)=>(
+                    <tr key={pi} style={{borderTop:'1px solid #1a1a2e'}}>
+                      <td style={{padding:'7px 8px',color:PLAYER_COLORS[pi],fontWeight:'bold',whiteSpace:'nowrap'}}>
+                        {players[pi]}
+                      </td>
+                      {games.map((g,gi)=>{
+                        const score = g.mahjongByPlayer[pi];
+                        const played = g.activePlayers.includes(pi);
+                        return (
+                          <td key={gi} style={{textAlign:'right',padding:'7px 8px',whiteSpace:'nowrap',fontSize:15,
+                            color:!played?'#333':score>0?'#2ecc71':score<0?'#e74c3c':'#aaa'}}>
+                            {!played?'—':(score>0?'+':'')+fmtScore(score)}
+                          </td>
+                        );
+                      })}
+                      <td style={{textAlign:'right',padding:'7px 8px',fontWeight:'bold',whiteSpace:'nowrap',fontSize:16,
+                        color:runningTotals[pi]>0?'#2ecc71':runningTotals[pi]<0?'#e74c3c':'#aaa'}}>
+                        {runningTotals[pi]>0?'+':''}{fmtScore(runningTotals[pi])}
+                      </td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── RENDER: 同点処理 ───────────────────────────────────────────
+  if (step==='tiebreak') {
+    const nextRankLabel = RANK_LABELS[tieBaseRank + tieSelection.length];
+    return (
+      <div style={{padding:20}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+          <h2 style={{fontSize:18,color:'#f39c12'}}>⚖️ 同点処理</h2>
+          {tieGroups.length>1&&<span style={{fontSize:12,color:'#aaa'}}>{tieGroupIdx+1}/{tieGroups.length}グループ</span>}
+        </div>
+        <div style={{background:'#16213e',borderRadius:12,padding:14,marginBottom:16}}>
+          <div style={{fontSize:13,color:'#aaa',marginBottom:6}}>
+            {curTieGroup.length}人が <span style={{color:'#fff',fontWeight:'bold'}}>
+              {(Number(points[curTieGroup[0]])||0).toLocaleString()}点
+            </span> で同点です
+          </div>
+          <div style={{fontSize:13,color:'#f39c12'}}>
+            上位から順にタップ → 現在 <strong>{nextRankLabel}</strong> を選択中
+          </div>
+        </div>
+        {curTieGroup.map(pi=>{
+          const selIdx = tieSelection.indexOf(pi);
+          const done   = selIdx !== -1;
+          return (
+            <button key={pi} onClick={()=>selectTied(pi)} disabled={done}
+              style={{width:'100%',padding:16,borderRadius:12,marginBottom:10,
+                border:`2px solid ${done?PLAYER_COLORS[pi]+'66':PLAYER_COLORS[pi]}`,
+                background:done?PLAYER_COLORS[pi]+'22':'#16213e',
+                color:done?'#666':'#fff',cursor:done?'default':'pointer',
+                display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <div style={{width:10,height:10,borderRadius:'50%',background:PLAYER_COLORS[pi]}}/>
+                <span style={{color:done?'#666':PLAYER_COLORS[pi],fontWeight:'bold',fontSize:15}}>
+                  {players[pi]}
+                </span>
+              </div>
+              {done
+                ? <span style={{color:'#555',fontSize:14}}>{RANK_LABELS[tieBaseRank+selIdx]} ✓</span>
+                : <span style={{color:'#aaa',fontSize:13}}>タップして選択</span>
+              }
+            </button>
+          );
+        })}
+        <button onClick={()=>{setStep('scores');setTieGroups([]);setTieSelection([]);}}
+          style={{width:'100%',padding:12,borderRadius:10,border:'1px solid #444',marginTop:4,
+            background:'transparent',color:'#aaa',fontSize:14,cursor:'pointer'}}>
+          ← 点数入力に戻る
+        </button>
+      </div>
+    );
+  }
+
+  // ── RENDER: 飛び賞 ─────────────────────────────────────────────
+  if (step==='tobi') {
+    const bPi       = curTobiPi;
+    const others    = activePlayers.filter(pi=>pi!==bPi);
+    const progress  = tobiQueue.length>1 ? `（${tobiIdx+1}/${tobiQueue.length}人目）` : '';
+    return (
+      <div style={{padding:20}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+          <h2 style={{fontSize:18,color:'#e74c3c'}}>💥 飛び賞{progress}</h2>
+        </div>
+        <div style={{background:'#16213e',borderRadius:12,padding:16,marginBottom:20}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
+            <div style={{width:10,height:10,borderRadius:'50%',background:PLAYER_COLORS[bPi]}}/>
+            <span style={{color:PLAYER_COLORS[bPi],fontWeight:'bold',fontSize:18}}>{players[bPi]}</span>
+            <span style={{color:'#e74c3c',fontSize:14}}>が飛びました</span>
+          </div>
+          <div style={{fontSize:13,color:'#aaa'}}>
+            持ち点: <span style={{color:'#e74c3c',fontWeight:'bold'}}>
+              {(Number(points[bPi])||0).toLocaleString()}点（箱下）
+            </span>
+          </div>
+          <div style={{marginTop:8,fontSize:13,color:'#aaa'}}>
+            誰が飛ばしましたか？ → その人に <span style={{color:'#2ecc71',fontWeight:'bold'}}>+10</span>、
+            飛んだ人に <span style={{color:'#e74c3c',fontWeight:'bold'}}>-10</span>
+          </div>
+        </div>
+        <div style={{marginBottom:8,fontSize:12,color:'#aaa'}}>飛ばしたプレイヤーを選択：</div>
+        {others.map(pi=>(
+          <button key={pi} onClick={()=>assignTobi(pi)}
+            style={{width:'100%',padding:14,borderRadius:12,marginBottom:8,
+              border:`2px solid ${PLAYER_COLORS[pi]}`,
+              background:PLAYER_COLORS[pi]+'22',color:PLAYER_COLORS[pi],
+              fontWeight:'bold',fontSize:15,cursor:'pointer',
+              display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <div style={{width:8,height:8,borderRadius:'50%',background:PLAYER_COLORS[pi]}}/>
+              {players[pi]}
+            </div>
+            <span style={{color:'#2ecc71',fontSize:13}}>+10 をもらう</span>
+          </button>
+        ))}
+        <button onClick={()=>assignTobi(null)}
+          style={{width:'100%',padding:12,borderRadius:10,border:'1px solid #444',marginTop:4,
+            background:'transparent',color:'#aaa',fontSize:14,cursor:'pointer'}}>
+          飛び賞なし（適用しない）
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ── 履歴画面 ─────────────────────────────────────────────────────
+function HistoryScreen({ players, rules, games, onBack, onEndSession }) {
+  const runningTotals = players.map((_,pi) =>
+    games.reduce((s,g)=>s+(g.mahjongByPlayer[pi]??0),0)
+  );
+  const gamesPlayed = players.map((_,pi) =>
+    games.filter(g=>g.activePlayers.includes(pi)).length
+  );
+  const sorted = players.map((n,i)=>({name:n,total:runningTotals[i],played:gamesPlayed[i],color:PLAYER_COLORS[i]}))
+    .sort((a,b)=>b.total-a.total);
+  const hasChip = rules.chipRate>0, hasFee = rules.場代>0;
+
+  return (
+    <div style={{padding:20}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+        <h2 style={{fontSize:18,color:'#f39c12'}}>📊 履歴 ({games.length}局)</h2>
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={onBack} style={{...tabBtn,background:'#2d2d4e',color:'#aaa',fontSize:12}}>← 戻る</button>
+          <button onClick={onEndSession} style={{...tabBtn,background:'#9b59b6',color:'#fff',fontSize:12}}>終了</button>
+        </div>
+      </div>
+
+      <div style={{background:'#16213e',borderRadius:12,padding:14,marginBottom:14}}>
+        <div style={{fontSize:12,color:'#aaa',marginBottom:10}}>麻雀収支（累計）</div>
+        {sorted.map((p,rank)=>(
+          <div key={p.name} style={{display:'flex',justifyContent:'space-between',alignItems:'center',
+            padding:'8px 0',borderBottom:rank<sorted.length-1?'1px solid #2d2d4e':'none'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{color:'#555',fontSize:12,width:24}}>{RANK_LABELS[rank]}</span>
+              <span style={{color:p.color,fontWeight:'bold',fontSize:15}}>{p.name}</span>
+              <span style={{fontSize:11,color:'#555'}}>{p.played}局</span>
+            </div>
+            <ScoreTag value={p.total} size={20}/>
+          </div>
+        ))}
+      </div>
+
+      <div style={{background:'#16213e',borderRadius:10,padding:10,marginBottom:14,
+        fontSize:12,color:'#666',display:'flex',flexWrap:'wrap',gap:'4px 12px'}}>
+        <span>持ち点:{rules.持ち点.toLocaleString()}</span>
+        <span>返し:{rules.返し点.toLocaleString()}</span>
+        <span>ウマ:{rules.umaLabel}（{rules.umaDesc}）</span>
+        <span>レート:{rules.レート}/1000点</span>
+      </div>
+
+      {games.length===0 ? (
+        <div style={{textAlign:'center',color:'#555',padding:20}}>まだ記録がありません</div>
+      ) : (
+        [...games].reverse().map((g,rev)=>{
+          const idx = games.length-1-rev;
+          const sortedP = g.activePlayers
+            .map(pi=>({pi,name:players[pi],pts:g.pointsByPlayer[pi],mj:g.mahjongByPlayer[pi]}))
+            .sort((a,b)=>b.pts-a.pts);
+          const absentNames = players.filter((_,i)=>!g.activePlayers.includes(i));
+          return (
+            <div key={idx} style={{background:'#16213e',borderRadius:10,padding:12,marginBottom:10}}>
+              <div style={{fontSize:12,color:'#aaa',marginBottom:8,display:'flex',justifyContent:'space-between'}}>
+                <span>第{idx+1}局</span>
+                {absentNames.length>0 && <span style={{color:'#555'}}>抜け: {absentNames.join('・')}</span>}
+              </div>
+              {sortedP.map((p,rank)=>(
+                <div key={p.pi} style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:5}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    <span style={{color:'#555',fontSize:11}}>{RANK_LABELS[rank]}</span>
+                    <span style={{color:PLAYER_COLORS[p.pi],fontSize:13}}>{p.name}</span>
+                    <span style={{color:'#444',fontSize:11}}>{(p.pts).toLocaleString()}点</span>
+                  </div>
+                  <ScoreTag value={p.mj} size={14}/>
+                </div>
+              ))}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+// ── セッション終了 ────────────────────────────────────────────────
+function EndSessionScreen({ players, rules, games, playingCount, onBack, onReset }) {
+  // レート・チップ単価・場代は終了画面でも変更可能（セットアップの値を初期値に）
+  const [localChipRate, setLocalChipRate] = useState(rules.chipRate);
+  const [local場代, setLocal場代]           = useState(rules.場代);
+  const initChips  = rules.initialChips ?? 20;
+  // chips は「最終枚数」で入力、初期値 = initialChips
+  const [chips, setChips]                 = useState(Object.fromEntries(players.map((_,i)=>[i,initChips])));
+  const [showConfirm, setShowConfirm]     = useState(false);
+
+  const rate       = rules.レート;
+  // 全員の最終枚数合計 = initialChips × 人数 なら辻褄が合う
+  const chipSum    = players.reduce((s,_,i)=>s+(Number(chips[i])||0),0);
+  const totalInitialChips = initChips * players.length;
+  const chipOk     = localChipRate===0 || chipSum===totalInitialChips;
+
+  const mjScore    = players.map((_,pi)=>games.reduce((s,g)=>s+(g.mahjongByPlayer[pi]??0),0));
+  const mjYen      = players.map((_,i)=>Math.round(mjScore[i]*rate));
+  const gamesPlayed= players.map((_,pi)=>games.filter(g=>g.activePlayers.includes(pi)).length);
+  const perPersonFee = local場代 > 0 ? Math.round(local場代 / players.length) : 0;
+  const feeYen     = players.map(()=>perPersonFee>0 ? -perPersonFee : 0);
+  // chipYen = (最終枚数 - 初期枚数) × チップ単価
+  const chipYen    = players.map((_,i)=>localChipRate>0 ? ((Number(chips[i])||0)-initChips)*localChipRate : 0);
+  const grandYen   = players.map((_,i)=>mjYen[i]+feeYen[i]+chipYen[i]);
+
+  const sorted = players.map((n,i)=>({name:n,i,
+    mjScore:mjScore[i], mjYen:mjYen[i], feeYen:feeYen[i], chipYen:chipYen[i], total:grandYen[i]
+  })).sort((a,b)=>b.total-a.total);
+
+  return (
+    <div style={{padding:20}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+        <h2 style={{fontSize:18,color:'#f39c12'}}>🏁 セッション終了</h2>
+        <button onClick={onBack} style={{...tabBtn,background:'#2d2d4e',color:'#aaa',fontSize:12}}>← 戻る</button>
+      </div>
+
+      {/* チップ精算 */}
+      <Section title="チップ精算">
+        <div style={{marginBottom:12}}>
+          <NumberInput label="チップ単価" value={localChipRate} onChange={setLocalChipRate} min={0} step={100} suffix="/枚"/>
+        </div>
+        {localChipRate > 0 ? (
+          <>
+            <div style={{fontSize:12,color:'#aaa',marginBottom:10}}>
+              最終枚数を入力（初期: 各{initChips}枚 / 合計={totalInitialChips}枚）
+            </div>
+            {players.map((name,i)=>(
+              <div key={i} style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+                <div style={{width:8,height:32,borderRadius:4,background:PLAYER_COLORS[i],flexShrink:0}}/>
+                <span style={{width:72,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+                <div style={{flex:1,display:'flex',alignItems:'center',gap:4}}>
+                  <button onClick={()=>setChips(c=>({...c,[i]:(Number(c[i])||0)-1}))} style={btnSmall}>−</button>
+                  <input type="text" inputMode="numeric" value={chips[i]??0}
+                    onFocus={e=>e.target.select()}
+                    onChange={e=>{const v=e.target.value; setChips(c=>({...c,[i]:v===''||v==='-'?v:(parseInt(v)||0)}));}}
+                    onBlur={()=>setChips(c=>({...c,[i]:c[i]===''||c[i]==='-'?0:c[i]}))}
+                    style={{flex:1,textAlign:'center',background:'#2d2d4e',border:'1px solid #444',
+                      color:'#fff',borderRadius:6,padding:'6px 4px',fontSize:15}}/>
+                  <button onClick={()=>setChips(c=>({...c,[i]:(Number(c[i])||0)+1}))} style={btnSmall}>＋</button>
+                </div>
+                <div style={{textAlign:'right'}}>
+                  <div style={{fontSize:11,color:'#555'}}>
+                    {(Number(chips[i])||0)-initChips>0?'+':''}{(Number(chips[i])||0)-initChips}枚
+                  </div>
+                  <div style={{fontSize:13,fontWeight:'bold',
+                    color:chipYen[i]>0?'#2ecc71':chipYen[i]<0?'#e74c3c':'#aaa'}}>
+                    {chipYen[i]>0?'+':''}{chipYen[i].toLocaleString()}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div style={{borderTop:'1px solid #2d2d4e',paddingTop:10,display:'flex',justifyContent:'space-between',
+              fontSize:13,color:chipSum!==0?'#e74c3c':'#2ecc71'}}>
+              <span>合計: {chipSum}枚</span>
+              <span>{!chipOk?`❌ 合計${totalInitialChips}枚にしてください`:'✅ OK'}</span>
+            </div>
+          </>
+        ) : (
+          <div style={{fontSize:12,color:'#555'}}>チップなし（単価を設定すると入力欄が表示されます）</div>
+        )}
+      </Section>
+
+      {/* 場代 */}
+      <Section title="場代">
+        <div style={{marginBottom:12}}>
+          <NumberInput label="場代（合計/1局）" value={local場代} onChange={setLocal場代} min={0} step={100} suffix="円"/>
+        </div>
+        {local場代 > 0 ? (
+          <>
+            <div style={{fontSize:12,color:'#aaa',marginBottom:8}}>
+              1人 {Math.round(local場代/players.length).toLocaleString()}円（{local場代.toLocaleString()}円 ÷ {players.length}人）を均等控除
+            </div>
+            {players.map((name,i)=>(
+              <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                <div style={{display:'flex',alignItems:'center',gap:8}}>
+                  <div style={{width:8,height:8,borderRadius:'50%',background:PLAYER_COLORS[i]}}/>
+                  <span style={{fontSize:13,color:PLAYER_COLORS[i]}}>{name}</span>
+                  <span style={{fontSize:11,color:'#555'}}>{gamesPlayed[i]}局</span>
+                </div>
+                <span style={{color:'#e74c3c',fontSize:14,fontWeight:'bold'}}>{feeYen[i].toLocaleString()}</span>
+              </div>
+            ))}
+          </>
+        ) : (
+          <div style={{fontSize:12,color:'#555'}}>場代なし（金額を設定すると自動計算されます）</div>
+        )}
+      </Section>
+
+      {/* 局ごと＋累計テーブル */}
+      {games.length>0&&(
+        <div style={{background:'#16213e',borderRadius:12,padding:'12px 8px',marginBottom:16,overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:14}}>
+            <thead>
+              <tr>
+                <th style={{textAlign:'left',padding:'4px 8px',color:'#555',fontWeight:'normal',whiteSpace:'nowrap'}}>名前</th>
+                {games.map((_,gi)=>(
+                  <th key={gi} style={{textAlign:'right',padding:'4px 8px',color:'#555',fontWeight:'normal',whiteSpace:'nowrap'}}>
+                    {gi+1}局
+                  </th>
+                ))}
+                <th style={{textAlign:'right',padding:'4px 8px',color:'#aaa',fontWeight:'bold',whiteSpace:'nowrap'}}>累計</th>
+              </tr>
+            </thead>
+            <tbody>
+              {players.map((_,i)=>i)
+                .sort((a,b)=>mjScore[b]-mjScore[a])
+                .map((pi)=>(
+                  <tr key={pi} style={{borderTop:'1px solid #1a1a2e'}}>
+                    <td style={{padding:'7px 8px',color:PLAYER_COLORS[pi],fontWeight:'bold',whiteSpace:'nowrap'}}>
+                      {players[pi]}
+                    </td>
+                    {games.map((g,gi)=>{
+                      const score = g.mahjongByPlayer[pi];
+                      const played = g.activePlayers.includes(pi);
+                      return (
+                        <td key={gi} style={{textAlign:'right',padding:'7px 8px',whiteSpace:'nowrap',fontSize:15,
+                          color:!played?'#333':score>0?'#2ecc71':score<0?'#e74c3c':'#aaa'}}>
+                          {!played?'—':(score>0?'+':'')+fmtScore(score)}
+                        </td>
+                      );
+                    })}
+                    <td style={{textAlign:'right',padding:'7px 8px',fontWeight:'bold',whiteSpace:'nowrap',fontSize:16,
+                      color:mjScore[pi]>0?'#2ecc71':mjScore[pi]<0?'#e74c3c':'#aaa'}}>
+                      {mjScore[pi]>0?'+':''}{fmtScore(mjScore[pi])}
+                    </td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* 最終結果 */}
+      <div style={{background:'#16213e',borderRadius:12,padding:14,marginBottom:16}}>
+        <div style={{fontSize:13,color:'#f39c12',fontWeight:'bold',marginBottom:4}}>最終収支</div>
+        <div style={{fontSize:11,color:'#555',marginBottom:12}}>レート: {rate}/1000点</div>
+        {sorted.map((p,rank)=>(
+          <div key={p.i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',
+            padding:'10px 0',borderBottom:rank<sorted.length-1?'1px solid #2d2d4e':'none'}}>
+            <div>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                <span style={{color:'#555',fontSize:12,width:24}}>{RANK_LABELS[rank]}</span>
+                <span style={{color:PLAYER_COLORS[p.i],fontWeight:'bold',fontSize:15}}>{p.name}</span>
+              </div>
+              <div style={{fontSize:11,color:'#666',marginLeft:32,lineHeight:1.8}}>
+                <span>麻雀 {p.mjScore>0?'+':''}{fmtScore(p.mjScore)} → {p.mjYen>0?'+':''}{p.mjYen.toLocaleString()}</span>
+                {localChipRate>0 && <div>チップ: {p.chipYen>0?'+':''}{p.chipYen.toLocaleString()}</div>}
+                {local場代>0    && <div>場代: {p.feeYen.toLocaleString()}</div>}
+              </div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{color:p.total>0?'#2ecc71':p.total<0?'#e74c3c':'#aaa',fontWeight:'bold',fontSize:22}}>
+                {p.total>0?'+':''}{p.total.toLocaleString()}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* リセット */}
+      <div style={{marginTop:8}}>
+        {!showConfirm ? (
+          <button onClick={()=>setShowConfirm(true)}
+            style={{width:'100%',padding:12,borderRadius:10,border:'1px solid #c0392b',
+              background:'transparent',color:'#e74c3c',fontSize:14,cursor:'pointer'}}>
+            このセッションを終了して新しく始める
+          </button>
+        ) : (
+          <div style={{background:'#2d2d4e',borderRadius:10,padding:14}}>
+            <div style={{marginBottom:12,fontSize:14}}>本当にリセットしますか？すべての記録が消えます。</div>
+            <div style={{display:'flex',gap:10}}>
+              <button onClick={onReset} style={{flex:1,padding:10,borderRadius:8,border:'none',
+                background:'#e74c3c',color:'#fff',fontSize:14,cursor:'pointer'}}>リセット</button>
+              <button onClick={()=>setShowConfirm(false)} style={{flex:1,padding:10,borderRadius:8,border:'none',
+                background:'#3d3d6e',color:'#fff',fontSize:14,cursor:'pointer'}}>キャンセル</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── メインアプリ ─────────────────────────────────────────────────
+function App() {
+  const [screen, setScreen] = useState('setup');
+  const [config, setConfig] = useState(null);
+  const [games, setGames] = useState([]);
+
+  useEffect(() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('mahjong_state')||'null');
+      if (s?.config) { setConfig(s.config); setGames(s.games||[]); setScreen('game'); }
+    } catch {}
+  }, []);
+
+  const save = (cfg,gs) => {
+    try { localStorage.setItem('mahjong_state', JSON.stringify({config:cfg,games:gs})); } catch {}
+  };
+
+  const handleStart = (cfg) => { setConfig(cfg); setGames([]); setScreen('game'); save(cfg,[]); };
+  const handleAddGame = (game) => { const gs=[...games,game]; setGames(gs); save(config,gs); };
+  const handleReset = () => {
+    setConfig(null); setGames([]); setScreen('setup');
+    try { localStorage.removeItem('mahjong_state'); } catch {}
+  };
+
+  return (
+    <div>
+      {screen==='setup' && <SetupScreen onStart={handleStart}/>}
+      {screen==='game' && config && (
+        <ScoreInputScreen
+          players={config.players} playingCount={config.playingCount}
+          rules={config.rules} games={games}
+          onAddGame={handleAddGame}
+          onShowHistory={()=>setScreen('history')}
+          onEndSession={()=>setScreen('end')}
+        />
+      )}
+      {screen==='history' && config && (
+        <HistoryScreen
+          players={config.players} rules={config.rules} games={games}
+          onBack={()=>setScreen('game')}
+          onEndSession={()=>setScreen('end')}
+        />
+      )}
+      {screen==='end' && config && (
+        <EndSessionScreen
+          players={config.players} rules={config.rules} games={games}
+          playingCount={config.playingCount}
+          onBack={()=>setScreen('game')}
+          onReset={handleReset}
+        />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
