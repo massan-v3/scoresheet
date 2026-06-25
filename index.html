@@ -138,7 +138,10 @@ function ScoreTag({ value, size=14, suffix='' }) {
 function SetupScreen({ onStart }) {
   const [totalPlayers, setTotalPlayers] = useState(4);
   const [playingCount, setPlayingCount] = useState(4);
-  const [names, setNames] = useState(['自分','プレイヤー2','プレイヤー3','プレイヤー4','プレイヤー5','プレイヤー6','プレイヤー7']);
+  const defaultNames = ['自分','プレイヤー2','プレイヤー3','プレイヤー4','プレイヤー5','プレイヤー6','プレイヤー7'];
+  const savedNames = (() => { try { return JSON.parse(localStorage.getItem('mahjong_names')||'null'); } catch { return null; } })();
+  const [names, setNames] = useState(savedNames || defaultNames);
+  const updateNames = (n) => { setNames(n); try { localStorage.setItem('mahjong_names', JSON.stringify(n)); } catch {} };
   const [持ち点, set持ち点] = useState(25000);
   const [返し点, set返し点] = useState(30000);
   const [umaIdx, setUmaIdx] = useState(3); // 10-30がデフォルト
@@ -188,7 +191,7 @@ function SetupScreen({ onStart }) {
         {Array.from({length:totalPlayers}).map((_,i) => (
           <div key={i} style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
             <div style={{width:10,height:10,borderRadius:'50%',background:PLAYER_COLORS[i],flexShrink:0}}/>
-            <input value={names[i]} onChange={e=>{const n=[...names];n[i]=e.target.value;setNames(n);}}
+            <input value={names[i]} onChange={e=>{const n=[...names];n[i]=e.target.value;updateNames(n);}}
               style={{flex:1,background:'#2d2d4e',border:'1px solid #444',color:'#fff',
                 borderRadius:8,padding:'8px 12px',fontSize:15}}/>
           </div>
