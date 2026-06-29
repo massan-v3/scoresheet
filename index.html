@@ -487,18 +487,28 @@ function ScoreInputScreen({ players, playingCount, rules, games, onAddGame, onSh
           {activePlayers.map(pi=>(
             <div key={pi} style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
               <div style={{width:8,height:36,borderRadius:4,background:PLAYER_COLORS[pi],flexShrink:0}}/>
-              <span style={{width:72,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+              <span style={{width:80,flexShrink:0,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
                 {players[pi]}
               </span>
               <div style={{flex:1,display:'flex',alignItems:'center',gap:4}}>
-                <button onClick={()=>setPoints(p=>({...p,[pi]:(Number(p[pi])||0)-100}))} style={btnSmall}>−</button>
-                <input type="text" inputMode="numeric" value={points[pi]??0}
-                  onFocus={e=>{ if(String(points[pi]??0)==='0'||String(points[pi]??0)===String(rules.持ち点)) e.target.select(); }}
-                  onChange={e=>{const v=e.target.value; setPoints(p=>({...p,[pi]:v===''||v==='-'?v:(parseInt(v)||0)}));}}
-                  onBlur={e=>{ setPoints(p=>({...p,[pi]:p[pi]===''||p[pi]==='-'?0:p[pi]})); }}
-                  style={{flex:1,textAlign:'center',background:'#2d2d4e',border:'1px solid #444',
-                    color:'#fff',borderRadius:6,padding:'6px 4px',fontSize:15}}/>
-                <button onClick={()=>setPoints(p=>({...p,[pi]:(Number(p[pi])||0)+100}))} style={btnSmall}>＋</button>
+                <div style={{flex:1,display:'flex',alignItems:'center',background:'#2d2d4e',border:'1px solid #444',borderRadius:6,overflow:'hidden'}}>
+                  <input type="text" inputMode="numeric"
+                    value={points[pi]===''||points[pi]==='-' ? points[pi] : Math.round((Number(points[pi])||0)/100)||''}
+                    onFocus={e=>e.target.select()}
+                    onChange={e=>{
+                      const v=e.target.value;
+                      if(v===''||v==='-') setPoints(p=>({...p,[pi]:v}));
+                      else { const n=parseInt(v); if(!isNaN(n)) setPoints(p=>({...p,[pi]:n*100})); }
+                    }}
+                    onBlur={()=>setPoints(p=>({...p,[pi]:p[pi]===''||p[pi]==='-'?0:p[pi]}))}
+                    style={{flex:1,textAlign:'right',background:'transparent',border:'none',
+                      color:'#fff',padding:'6px 0 6px 8px',fontSize:15,outline:'none',minWidth:0}}/>
+                  <span style={{color:'#666',fontSize:15,padding:'0 8px 0 0',userSelect:'none'}}>00</span>
+                </div>
+                <button onClick={()=>setPoints(p=>({...p,[pi]:-(Number(p[pi])||0)}))}
+                  style={{...btnSmall,background:'#2d2d4e',color:'#f39c12',fontWeight:'bold',fontSize:12,minWidth:32}}>
+                  ±
+                </button>
               </div>
             </div>
           ))}
@@ -791,25 +801,22 @@ function EndSessionScreen({ players, rules, games, playingCount, onBack, onReset
               最終枚数を入力（初期: 各{initChips}枚 / 合計={totalInitialChips}枚）
             </div>
             {players.map((name,i)=>(
-              <div key={i} style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+              <div key={i} style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
                 <div style={{width:8,height:32,borderRadius:4,background:PLAYER_COLORS[i],flexShrink:0}}/>
-                <span style={{width:72,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
-                <div style={{flex:1,display:'flex',alignItems:'center',gap:4}}>
+                <span style={{flex:1,color:PLAYER_COLORS[i],fontWeight:'bold',fontSize:14,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{name}</span>
+                <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
                   <button onClick={()=>setChips(c=>({...c,[i]:(Number(c[i])||0)-1}))} style={btnSmall}>−</button>
                   <input type="text" inputMode="numeric" value={chips[i]??0}
                     onFocus={e=>e.target.select()}
                     onChange={e=>{const v=e.target.value; setChips(c=>({...c,[i]:v===''||v==='-'?v:(parseInt(v)||0)}));}}
                     onBlur={()=>setChips(c=>({...c,[i]:c[i]===''||c[i]==='-'?0:c[i]}))}
-                    style={{flex:1,textAlign:'center',background:'#2d2d4e',border:'1px solid #444',
+                    style={{width:44,textAlign:'center',background:'#2d2d4e',border:'1px solid #444',
                       color:'#fff',borderRadius:6,padding:'6px 4px',fontSize:15}}/>
                   <button onClick={()=>setChips(c=>({...c,[i]:(Number(c[i])||0)+1}))} style={btnSmall}>＋</button>
                 </div>
-                <div style={{textAlign:'right'}}>
-                  <div style={{fontSize:11,color:'#555'}}>
-                    {(Number(chips[i])||0)-initChips>0?'+':''}{(Number(chips[i])||0)-initChips}枚
-                  </div>
-                  <div style={{fontSize:13,fontWeight:'bold',
-                    color:chipYen[i]>0?'#2ecc71':chipYen[i]<0?'#e74c3c':'#aaa'}}>
+                <div style={{textAlign:'right',flexShrink:0,minWidth:44}}>
+                  <div style={{fontSize:11,color:'#555'}}>{(Number(chips[i])||0)-initChips>0?'+':''}{(Number(chips[i])||0)-initChips}枚</div>
+                  <div style={{fontSize:13,fontWeight:'bold',color:chipYen[i]>0?'#2ecc71':chipYen[i]<0?'#e74c3c':'#aaa'}}>
                     {chipYen[i]>0?'+':''}{chipYen[i].toLocaleString()}
                   </div>
                 </div>
